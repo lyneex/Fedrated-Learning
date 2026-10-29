@@ -94,7 +94,7 @@ def build_model(n_features: int):
     if config.DATA_MODE == "multimodal":
         from src.multimodal_model import MultimodalFusionModel
         return MultimodalFusionModel(n_ehr_features=n_features)
-    if config.DATA_MODE == "tabular":
+    if config.DATA_MODE in {"tabular", "cardiovascular_tabular"}:
         return CardioMLP(n_features=n_features)
     raise ValueError(
         f"Unsupported DATA_MODE={config.DATA_MODE!r}. "
