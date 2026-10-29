@@ -133,6 +133,29 @@ class ImagingEncoder(nn.Module):
         return self.fc(x)
 
 
+class ImageClassifier(nn.Module):
+    """Binary image-recognition model for image-only datasets.
+
+    This is deliberately separate from the fusion model: an image-only sample
+    should use the CNN directly, rather than passing fabricated EHR/vitals
+    tensors through a multimodal model.
+    """
+
+    def __init__(self, embed_dim: int = config.EMBED_DIM, dropout: float = config.DROPOUT):
+        super().__init__()
+        self.encoder = ImagingEncoder(config.IMG_CHANNELS, embed_dim)
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 1),
+        )
+
+    def forward(self, x_img: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.encoder(x_img)).squeeze(-1)
+
+
 class MultimodalFusionModel(nn.Module):
     """
     Multimodal fusion model with missing-modality handling.

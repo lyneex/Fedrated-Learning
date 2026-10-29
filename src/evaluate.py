@@ -49,7 +49,7 @@ def evaluate_model(
 
     with torch.no_grad():
         for batch in loader:
-            if len(batch) == 5:
+            if config.DATA_MODE == "multimodal":
                 # Multimodal: (x_ehr, x_vitals, x_img, mask, y)
                 x_ehr, x_vit, x_img, mask, y_batch = [b.to(device) for b in batch]
                 logits = model(x_ehr, x_vit, x_img, mask)

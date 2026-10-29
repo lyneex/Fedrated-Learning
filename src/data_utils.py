@@ -26,7 +26,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import torch
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import Dataset, TensorDataset, DataLoader, Subset
+from PIL import Image
 
 import src.config as config
 
@@ -146,6 +147,101 @@ def _make_tensor_dataset(X: np.ndarray, y: np.ndarray) -> TensorDataset:
         torch.tensor(X, dtype=torch.float32),
         torch.tensor(y, dtype=torch.float32),
     )
+
+
+class ImageManifestDataset(Dataset):
+    """Read images on demand from a manifest; no full image array is kept in RAM."""
+
+    def __init__(self, paths: List[str], labels: np.ndarray):
+        self.paths = paths
+        self.labels = torch.tensor(labels, dtype=torch.float32)
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, index: int):
+        path = self.paths[index]
+        try:
+            with Image.open(path) as image:
+                image = image.convert("L").resize(
+                    (config.IMG_SIZE, config.IMG_SIZE), Image.Resampling.BILINEAR
+                )
+                pixels = np.asarray(image, dtype=np.float32) / 255.0
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Cannot read image {path!r}") from exc
+        return torch.from_numpy(pixels).unsqueeze(0), self.labels[index]
+
+
+def prepare_image_data() -> Tuple[List[Dataset], Dataset, None, int]:
+    """Load a binary image dataset from ``data/image_manifest.csv``.
+
+    Required manifest columns are configured by IMAGE_PATH_COLUMN and
+    IMAGE_LABEL_COLUMN. Paths are resolved against IMAGE_ROOT. Images remain on
+    disk until a DataLoader requests them, which keeps MIMIC-scale experiments
+    memory-safe.
+    """
+    manifest_path = config.IMAGE_MANIFEST_PATH
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(
+            f"Image manifest not found: {manifest_path}. Create it with columns "
+            f"'{config.IMAGE_PATH_COLUMN}' and '{config.IMAGE_LABEL_COLUMN}'."
+        )
+    manifest = pd.read_csv(manifest_path)
+    required = {config.IMAGE_PATH_COLUMN, config.IMAGE_LABEL_COLUMN}
+    missing = required.difference(manifest.columns)
+    if missing:
+        raise ValueError(f"Image manifest is missing required columns: {sorted(missing)}")
+
+    manifest = manifest[[config.IMAGE_PATH_COLUMN, config.IMAGE_LABEL_COLUMN]].dropna()
+    labels = pd.to_numeric(manifest[config.IMAGE_LABEL_COLUMN], errors="coerce")
+    valid = labels.isin([0, 1])
+    manifest, labels = manifest.loc[valid].reset_index(drop=True), labels.loc[valid].astype(np.float32)
+    class_counts = labels.value_counts()
+    if len(manifest) < 4 or labels.nunique() != 2 or class_counts.min() < 2:
+        raise ValueError(
+            "Image manifest needs at least two samples for each binary label so "
+            "a stratified train/test split can be made."
+        )
+
+    paths = [
+        path if os.path.isabs(path) else os.path.join(config.IMAGE_ROOT, path)
+        for path in manifest[config.IMAGE_PATH_COLUMN].astype(str)
+    ]
+    absent = [path for path in paths if not os.path.isfile(path)]
+    if absent:
+        raise FileNotFoundError(f"{len(absent)} image paths do not exist; first missing path: {absent[0]}")
+
+    indices = np.arange(len(paths))
+    train_idx, test_idx = train_test_split(
+        indices, test_size=config.TEST_SIZE, stratify=labels, random_state=config.SEED
+    )
+    train_parts = np.array_split(
+        np.random.default_rng(config.SEED).permutation(train_idx), config.NUM_CLIENTS
+    )
+    dataset = ImageManifestDataset(paths, labels.to_numpy())
+    hospitals = [Subset(dataset, part.tolist()) for part in train_parts]
+    test_dataset = Subset(dataset, test_idx.tolist())
+    print(f"[Data] Image mode: {len(train_idx):,} train | {len(test_idx):,} test")
+    print(f"[Data] Image class balance: label=0 {(labels == 0).sum():,} | label=1 {(labels == 1).sum():,}")
+    return hospitals, test_dataset, None, 0
+
+
+def prepare_selected_data():
+    """Dispatch data preparation to the mode selected in config.DATA_MODE."""
+    if config.DATA_MODE == "tabular":
+        return prepare_data()
+    if config.DATA_MODE == "cardiovascular_tabular":
+        from src.kaggle_cardio_data import prepare_kaggle_tabular_data
+        return prepare_kaggle_tabular_data()
+    if config.DATA_MODE == "image":
+        return prepare_image_data()
+    if config.DATA_MODE == "ecg_image":
+        from src.kaggle_cardio_data import prepare_kaggle_ecg_image_data
+        return prepare_kaggle_ecg_image_data()
+    if config.DATA_MODE == "multimodal":
+        from src.mimic_data import prepare_mimic_multimodal_data
+        return prepare_mimic_multimodal_data()
+    raise ValueError(f"Unsupported DATA_MODE={config.DATA_MODE!r}")
 
 
 def _hospital_indices(

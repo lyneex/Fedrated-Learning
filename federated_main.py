@@ -9,8 +9,7 @@ without requiring the Ray distributed computing backend.  Each round:
   4. Server evaluates the new global model on the shared test set.
   5. Server saves a per-round checkpoint.
 
-Supports both legacy single-modality (CardioMLP) and multimodal
-(MultimodalFusionModel) pipelines, controlled by config.MULTIMODAL.
+Selects tabular, image, or real multimodal training through config.DATA_MODE.
 
 Usage
 -----
@@ -44,7 +43,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import src.config as config
-from src.data_utils import prepare_data, prepare_multimodal_data
+from src.data_utils import prepare_selected_data
 from src.model import CardioMLP, get_parameters, set_parameters, save_checkpoint, load_checkpoint, build_model
 from src.evaluate import evaluate_model, print_report, save_metrics
 from src.visualize import (
@@ -101,7 +100,7 @@ def train_local(
 
     for _ in range(local_epochs):
         for batch in loader:
-            if len(batch) == 5:
+            if config.DATA_MODE == "multimodal":
                 # Multimodal: (x_ehr, x_vitals, x_img, mask, y)
                 x_ehr, x_vit, x_img, mask, y_batch = [b.to(device) for b in batch]
                 optimizer.zero_grad()
@@ -143,13 +142,10 @@ def main() -> None:
     print(f"[FL] Rounds      : {config.NUM_ROUNDS}")
     print(f"[FL] Local epochs: {config.LOCAL_EPOCHS}")
     print(f"[FL] Non-IID     : {config.NON_IID}")
-    print(f"[FL] Multimodal  : {config.MULTIMODAL}")
+    print(f"[FL] Data mode   : {config.DATA_MODE}")
 
     # -- Prepare data ----------------------------------------------------------
-    if config.MULTIMODAL:
-        hospital_datasets, test_dataset, scaler, n_features = prepare_multimodal_data()
-    else:
-        hospital_datasets, test_dataset, scaler, n_features = prepare_data()
+    hospital_datasets, test_dataset, scaler, n_features = prepare_selected_data()
 
     # -- Global model ----------------------------------------------------------
     global_model = build_model(n_features).to(device)

@@ -1,0 +1,4 @@
+image_path,label
+# Paths are relative to data/images/. Labels must be binary: 0 or 1.
+example/negative_image.jpg,0
+example/positive_image.jpg,1

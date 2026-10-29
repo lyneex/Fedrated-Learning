@@ -4,8 +4,7 @@ baseline.py -- Phase 1: Centralized Baseline Training.
 Trains one model on the entire training set (all hospital data combined) to
 establish a performance ceiling before federated learning.
 
-Supports both legacy single-modality (CardioMLP) and multimodal
-(MultimodalFusionModel) pipelines, controlled by config.MULTIMODAL.
+Selects tabular, image, or real multimodal training through config.DATA_MODE.
 
 Usage
 -----
@@ -29,7 +28,7 @@ import torch.nn as nn
 from torch.utils.data import ConcatDataset, DataLoader
 
 import src.config as config
-from src.data_utils import prepare_data, prepare_multimodal_data
+from src.data_utils import prepare_selected_data
 from src.model import CardioMLP, save_checkpoint, build_model
 from src.evaluate import evaluate_model, print_report, save_metrics
 from src.visualize import plot_baseline_history, plot_confusion_matrix
@@ -69,7 +68,7 @@ def train_centralized(
         total      = 0
 
         for batch in loader:
-            if len(batch) == 5:
+            if config.DATA_MODE == "multimodal":
                 # Multimodal: (x_ehr, x_vitals, x_img, mask, y)
                 x_ehr, x_vit, x_img, mask, y_batch = [b.to(device) for b in batch]
                 optimizer.zero_grad()
@@ -118,13 +117,10 @@ def main() -> dict:
     print(f"[Baseline] Epochs     : {config.BASELINE_EPOCHS}")
     print(f"[Baseline] Batch      : {config.BATCH_SIZE}")
     print(f"[Baseline] LR         : {config.LEARNING_RATE}")
-    print(f"[Baseline] Multimodal : {config.MULTIMODAL}")
+    print(f"[Baseline] Data mode  : {config.DATA_MODE}")
 
     # -- Data -----------------------------------------------------------------
-    if config.MULTIMODAL:
-        hospital_datasets, test_dataset, scaler, n_features = prepare_multimodal_data()
-    else:
-        hospital_datasets, test_dataset, scaler, n_features = prepare_data()
+    hospital_datasets, test_dataset, scaler, n_features = prepare_selected_data()
 
     # Combine all hospital partitions -> single training set for centralized run
     full_train = ConcatDataset(hospital_datasets)

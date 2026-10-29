@@ -94,7 +94,7 @@ class FlowerClient(fl.client.NumPyClient):
 
         for _ in range(local_epochs):
             for batch in loader:
-                if len(batch) == 5:
+                if config.DATA_MODE == "multimodal":
                     # Multimodal: (x_ehr, x_vitals, x_img, mask, y)
                     x_ehr, x_vit, x_img, mask, y_batch = [b.to(self.device) for b in batch]
                     optimizer.zero_grad()

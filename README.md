@@ -5,7 +5,7 @@
 [![Flower FL](https://img.shields.io/badge/Flower-FL-ffd43b.svg)](https://flower.ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-A decentralized, privacy-preserving deep learning framework that trains cardiovascular disease prediction models across distributed hospital clients without sharing patient data. Supports multimodal data integration (Tabular EHR, Time-series Vitals, and Medical Imaging) with robust handling of missing modalities across heterogeneous institutions.
+A decentralized, privacy-preserving deep learning framework that trains cardiovascular disease prediction models across distributed hospital clients without sharing patient data. It runs either tabular cardiovascular records or real labeled medical images; a real, patient-linked multimodal dataset is required before claiming a multimodal experiment.
 
 ---
 
@@ -58,7 +58,10 @@ Evaluated on held-out test data across 10 communication rounds ($K=3$ clients, n
 ## 📂 Repository Structure
 
 ```
-├── cardio_train.csv             # Kaggle cardiovascular disease dataset (70,000 records)
+├── data/
+│   ├── tabular/cardio_train.csv # Kaggle cardiovascular disease dataset (70,000 records)
+│   ├── images/                  # Local real images; ignored by Git
+│   └── manifests/               # Image-path and label CSV files
 ├── baseline.py                  # Centralized baseline training script
 ├── federated_main.py            # Federated simulation runner (FedAvg across hospitals)
 ├── requirements.txt             # Project dependencies
@@ -95,16 +98,81 @@ cd Fedrated-Learning
 pip install -r requirements.txt
 ```
 
-### 2. Run Centralized Baseline
-Train a centralized multimodal model on all hospital data combined:
+### 2. Run tabular cardiovascular training
+The checked-in `cardio_train.csv` contains 70,000 tabular patient records; it has no images.
 ```bash
-python baseline.py
+python3 baseline.py
 ```
 
 ### 3. Run Federated Simulation
 Execute 10 rounds of federated training across 3 simulated hospitals with heterogeneous modality availability:
 ```bash
-python federated_main.py
+python3 federated_main.py
 ```
 
-Outputs, loss curves, confusion matrices, and model checkpoints will be saved in `runs/`.
+Outputs are isolated by input mode, e.g. `runs/tabular/`, `runs/image/`, and
+`runs/multimodal/`, so models from different experiments are never compared by
+accident.
+
+### 4. Run image recognition
+
+After downloading an approved image dataset, set `DATA_MODE = "image"` in
+`src/config.py`. Copy `data/manifests/image_manifest.example.csv` to
+`data/manifests/image_manifest.csv` and replace its example rows with two columns:
+
+```csv
+image_path,label
+relative/path/to/image.jpg,0
+relative/path/to/positive-image.jpg,1
+```
+
+Paths are relative to `data/images/` by default. The image CNN reads images
+lazily, converts them to grayscale, resizes them to 64×64, and trains with the
+same baseline or federated commands above. Labels must be binary (`0` or `1`)
+and both classes need at least two samples.
+
+### 5. Run real EHR + vitals + chest-X-ray training (MIMIC)
+
+After receiving PhysioNet approval, place the MIMIC-CXR-DB `admissions.csv` and
+`radiographs.csv` in `data/mimic-cxr-db/`, MIMIC-IV `chartevents.csv.gz` in
+`data/mimic-iv/icu/`, and downloaded MIMIC-CXR-JPG images below
+`data/images/mimic-cxr-jpg/files/`. Then set `DATA_MODE = "multimodal"` and run:
+
+```bash
+python3 prepare_mimic_data.py
+python3 baseline.py
+python3 federated_main.py
+```
+
+The preparation script retains only admission-linked radiographs with a
+definite binary target, joins ICU vital chart events by `hadm_id`, resamples the
+four vital streams, and prevents a patient from appearing in both train and
+test sets. MIMIC files are ignored by Git.
+
+### 6. Run the small Kaggle cardiovascular experiments
+
+The Kaggle release included here has a clinical CSV and ECG image folders, but
+no verified mapping from a CSV row to an ECG image. They are intentionally run
+as separate binary experiments, where `Normal=0` and every other diagnosis is
+`1`; they are not patient-level multimodal fusion.
+
+```python
+# src/config.py
+DATA_MODE = "cardiovascular_tabular"  # clinical data, 4,327 records
+# or
+DATA_MODE = "ecg_image"               # ECG-image CNN, 928 images
+```
+
+For either mode, run the centralized baseline first and then the federated
+simulation:
+
+```bash
+python3 baseline.py
+python3 federated_main.py
+```
+
+To run both separate experiments with one command:
+
+```bash
+python3 run_kaggle_experiments.py
+```

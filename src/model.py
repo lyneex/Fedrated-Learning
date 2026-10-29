@@ -86,14 +86,18 @@ def load_checkpoint(model: nn.Module, path: str) -> None:
 
 def build_model(n_features: int):
     """
-    Factory: returns the appropriate model based on config.MULTIMODAL.
-
-    When MULTIMODAL=True, returns a MultimodalFusionModel;
-    otherwise returns the legacy CardioMLP.
+    Factory: returns the model selected by config.DATA_MODE.
     """
-    if config.MULTIMODAL:
+    if config.DATA_MODE in {"image", "ecg_image"}:
+        from src.multimodal_model import ImageClassifier
+        return ImageClassifier()
+    if config.DATA_MODE == "multimodal":
         from src.multimodal_model import MultimodalFusionModel
         return MultimodalFusionModel(n_ehr_features=n_features)
-    else:
+    if config.DATA_MODE == "tabular":
         return CardioMLP(n_features=n_features)
+    raise ValueError(
+        f"Unsupported DATA_MODE={config.DATA_MODE!r}. "
+        "Choose 'tabular', 'image', or 'multimodal'."
+    )
 
