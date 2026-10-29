@@ -46,4 +46,5 @@ data/mimic-iv/
 data/mimic-cxr-db/
 data/manifests/mimic_multimodal.csv
 data/manifests/mimic_vitals.npz
-data/cardiovascular_multimodal/
+data/cardiovascular_multimodal/*
+!data/cardiovascular_multimodal/cardiovascular_dataset.csv
