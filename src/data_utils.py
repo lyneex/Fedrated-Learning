@@ -23,10 +23,10 @@ from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 import torch
-from torch.utils.data import Dataset, TensorDataset, DataLoader, Subset
+from torch.utils.data import ConcatDataset, Dataset, TensorDataset, DataLoader, Subset
 from PIL import Image
 
 import src.config as config
@@ -215,9 +215,13 @@ def prepare_image_data() -> Tuple[List[Dataset], Dataset, None, int]:
     train_idx, test_idx = train_test_split(
         indices, test_size=config.TEST_SIZE, stratify=labels, random_state=config.SEED
     )
-    train_parts = np.array_split(
-        np.random.default_rng(config.SEED).permutation(train_idx), config.NUM_CLIENTS
+    splitter = StratifiedKFold(
+        n_splits=config.NUM_CLIENTS, shuffle=True, random_state=config.SEED
     )
+    train_parts = [
+        train_idx[client_positions]
+        for _, client_positions in splitter.split(train_idx, labels.to_numpy()[train_idx])
+    ]
     dataset = ImageManifestDataset(paths, labels.to_numpy())
     hospitals = [Subset(dataset, part.tolist()) for part in train_parts]
     test_dataset = Subset(dataset, test_idx.tolist())
@@ -242,6 +246,61 @@ def prepare_selected_data():
         from src.mimic_data import prepare_mimic_multimodal_data
         return prepare_mimic_multimodal_data()
     raise ValueError(f"Unsupported DATA_MODE={config.DATA_MODE!r}")
+
+
+def dataset_labels(dataset: Dataset) -> np.ndarray:
+    """Extract binary labels from project dataset types without loading images."""
+    if isinstance(dataset, TensorDataset):
+        return dataset.tensors[-1].detach().cpu().numpy().astype(int)
+    if isinstance(dataset, Subset):
+        return dataset_labels(dataset.dataset)[np.asarray(dataset.indices, dtype=int)]
+    if hasattr(dataset, "labels"):
+        labels = getattr(dataset, "labels")
+        if isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu().numpy()
+        return np.asarray(labels, dtype=int)
+    raise TypeError(f"Cannot extract labels from {type(dataset).__name__}")
+
+
+def split_client_validation_sets(
+    hospital_datasets: List[Dataset],
+) -> Tuple[List[Subset], ConcatDataset]:
+    """Hold out a stratified validation subset from every client dataset."""
+    train_clients: List[Subset] = []
+    validation_parts: List[Subset] = []
+    for cid, dataset in enumerate(hospital_datasets):
+        labels = dataset_labels(dataset)
+        positions = np.arange(len(dataset))
+        unique, counts = np.unique(labels, return_counts=True)
+        stratify = labels if len(unique) == 2 and counts.min() >= 2 else None
+        train_pos, val_pos = train_test_split(
+            positions,
+            test_size=config.VALIDATION_SIZE,
+            random_state=config.SEED + cid,
+            stratify=stratify,
+        )
+        train_clients.append(Subset(dataset, train_pos.tolist()))
+        validation_parts.append(Subset(dataset, val_pos.tolist()))
+        train_labels = labels[train_pos]
+        print(
+            f"[Data] Client {cid}: {len(train_pos):,} train | {len(val_pos):,} validation | "
+            f"positive rate {train_labels.mean():.3f}"
+        )
+    return train_clients, ConcatDataset(validation_parts)
+
+
+def training_pos_weight(datasets: List[Dataset], device: torch.device) -> torch.Tensor | None:
+    """Return BCE positive-class weight calculated from training clients only."""
+    if not config.USE_POS_WEIGHT:
+        return None
+    labels = np.concatenate([dataset_labels(dataset) for dataset in datasets])
+    positives = int(labels.sum())
+    negatives = int(len(labels) - positives)
+    if positives == 0 or negatives == 0:
+        return None
+    weight = negatives / positives
+    print(f"[Data] BCE positive-class weight: {weight:.4f}")
+    return torch.tensor(weight, dtype=torch.float32, device=device)
 
 
 def _hospital_indices(

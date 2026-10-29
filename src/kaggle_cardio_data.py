@@ -9,7 +9,7 @@ from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 import torch
 from torch.utils.data import Subset, TensorDataset
@@ -18,8 +18,24 @@ import src.config as config
 from src.data_utils import ImageManifestDataset
 
 
-def _split_clients(indices: np.ndarray) -> List[np.ndarray]:
-    return list(np.array_split(np.random.default_rng(config.SEED).permutation(indices), config.NUM_CLIENTS))
+def _split_clients(indices: np.ndarray, labels: np.ndarray) -> List[np.ndarray]:
+    """Create reproducible IID client partitions with preserved class balance."""
+    splitter = StratifiedKFold(
+        n_splits=config.NUM_CLIENTS, shuffle=True, random_state=config.SEED
+    )
+    client_indices = []
+    for _, client_positions in splitter.split(indices, labels[indices]):
+        client_indices.append(indices[client_positions])
+    return client_indices
+
+
+def _print_client_balance(hospitals: List[TensorDataset | Subset]) -> None:
+    for cid, dataset in enumerate(hospitals):
+        if isinstance(dataset, TensorDataset):
+            labels = dataset.tensors[-1].numpy()
+        else:
+            labels = dataset.dataset.labels[np.asarray(dataset.indices, dtype=int)].numpy()
+        print(f"[Kaggle] Client {cid}: {len(dataset):,} samples | abnormal rate {labels.mean():.3f}")
 
 
 def prepare_kaggle_tabular_data() -> Tuple[List[TensorDataset], TensorDataset, StandardScaler, int]:
@@ -42,10 +58,11 @@ def prepare_kaggle_tabular_data() -> Tuple[List[TensorDataset], TensorDataset, S
     values = scaler.transform(features).astype(np.float32)
     hospitals = [
         TensorDataset(torch.tensor(values[idx]), torch.tensor(labels[idx]))
-        for idx in _split_clients(train_idx)
+        for idx in _split_clients(train_idx, labels)
     ]
     test_dataset = TensorDataset(torch.tensor(values[test_idx]), torch.tensor(labels[test_idx]))
     print(f"[Kaggle] Clinical: {len(train_idx):,} train | {len(test_idx):,} test | {values.shape[1]} features")
+    _print_client_balance(hospitals)
     return hospitals, test_dataset, scaler, values.shape[1]
 
 
@@ -65,7 +82,8 @@ def prepare_kaggle_ecg_image_data() -> Tuple[List[Subset], Subset, None, int]:
     indices = np.arange(len(paths))
     train_idx, test_idx = train_test_split(indices, test_size=config.TEST_SIZE, stratify=labels_array, random_state=config.SEED)
     dataset = ImageManifestDataset(list(paths), labels_array)
-    hospitals = [Subset(dataset, idx.tolist()) for idx in _split_clients(train_idx)]
+    hospitals = [Subset(dataset, idx.tolist()) for idx in _split_clients(train_idx, labels_array)]
     test_dataset = Subset(dataset, test_idx.tolist())
     print(f"[Kaggle] ECG images: {len(train_idx):,} train | {len(test_idx):,} test | Normal=0, abnormal=1")
+    _print_client_balance(hospitals)
     return hospitals, test_dataset, None, 0

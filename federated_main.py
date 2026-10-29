@@ -17,8 +17,8 @@ Usage
 
 Outputs (under runs/federated/)
 ---------------------------------
-    final_metrics.json           - final global model scores on the test set
-    rounds_log.json              - per-round accuracy / loss / F1 / AUC
+    final_metrics.json           - held-out test scores for the best validation model
+    rounds_log.json              - per-round validation accuracy / loss / F1 / AUC
     accuracy_curve.png           - global accuracy over rounds
     loss_curve.png               - global BCE loss over rounds
     confusion_matrix.png         - final global model confusion matrix
@@ -43,9 +43,9 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import src.config as config
-from src.data_utils import prepare_selected_data
+from src.data_utils import prepare_selected_data, split_client_validation_sets, training_pos_weight
 from src.model import CardioMLP, get_parameters, set_parameters, save_checkpoint, load_checkpoint, build_model
-from src.evaluate import evaluate_model, print_report, save_metrics
+from src.evaluate import collect_predictions, evaluate_model, find_best_threshold, print_report, save_metrics
 from src.visualize import (
     plot_accuracy_curve,
     plot_loss_curve,
@@ -84,15 +84,16 @@ def train_local(
     lr: float         = config.LEARNING_RATE,
     cid: str          = "?",
     fl_round: int     = 0,
+    pos_weight: torch.Tensor | None = None,
 ) -> tuple:
     """
     Train model on local dataset for local_epochs.
     Supports both legacy 2-tuple and multimodal 5-tuple datasets.
     Returns (updated_weights, n_samples, avg_loss).
     """
-    loader    = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    loader    = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     model.train()
     total_loss = 0.0
@@ -146,6 +147,9 @@ def main() -> None:
 
     # -- Prepare data ----------------------------------------------------------
     hospital_datasets, test_dataset, scaler, n_features = prepare_selected_data()
+    hospital_datasets, validation_dataset = split_client_validation_sets(hospital_datasets)
+    pos_weight = training_pos_weight(hospital_datasets, device)
+    print(f"[FL] Validation samples: {len(validation_dataset):,}")
 
     # -- Global model ----------------------------------------------------------
     global_model = build_model(n_features).to(device)
@@ -160,6 +164,10 @@ def main() -> None:
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
 
     rounds_log: List[Dict] = []
+    best_validation_auc = float("-inf")
+    best_round = 0
+    remaining_patience = config.EARLY_STOPPING_PATIENCE
+    best_ckpt = os.path.join(config.CHECKPOINT_DIR, "best_validation_model.pt")
 
     print(f"\n[FL] Starting pure-Python FedAvg simulation ...\n")
 
@@ -192,6 +200,7 @@ def main() -> None:
                 lr=config.LEARNING_RATE,
                 cid=str(cid),
                 fl_round=fl_round,
+                pos_weight=pos_weight,
             )
             client_weights_list.append(weights)
             client_sizes.append(n_samples)
@@ -200,22 +209,26 @@ def main() -> None:
         aggregated_weights = fedavg_aggregate(client_weights_list, client_sizes)
         set_parameters(global_model, aggregated_weights)
 
-        # -- Server-side evaluation on the shared test set -----------------
-        metrics = evaluate_model(global_model, test_dataset, device=str(device))
+        # -- Server-side validation; the test set remains untouched here. ---
+        metrics = evaluate_model(global_model, validation_dataset, device=str(device))
 
         rounds_log.append({
             "round":     fl_round,
-            "loss":      metrics["loss"],
-            "accuracy":  metrics["accuracy"],
-            "precision": metrics["precision"],
-            "recall":    metrics["recall"],
-            "f1":        metrics["f1"],
-            "roc_auc":   metrics["roc_auc"],
+            "validation_loss":      metrics["loss"],
+            "validation_accuracy":  metrics["accuracy"],
+            "validation_precision": metrics["precision"],
+            "validation_recall":    metrics["recall"],
+            "validation_f1":        metrics["f1"],
+            "validation_roc_auc":   metrics["roc_auc"],
+            # Compatibility with existing plotting helpers.
+            "loss": metrics["loss"], "accuracy": metrics["accuracy"],
+            "precision": metrics["precision"], "recall": metrics["recall"],
+            "f1": metrics["f1"], "roc_auc": metrics["roc_auc"],
         })
 
         print(
             f"\n  [Server] Round {fl_round:02d} | "
-            f"test_accuracy={metrics['accuracy']:.4f} | "
+            f"validation_accuracy={metrics['accuracy']:.4f} | "
             f"f1={metrics['f1']:.4f} | "
             f"roc_auc={metrics['roc_auc']:.4f}"
         )
@@ -223,6 +236,16 @@ def main() -> None:
         # Save checkpoint
         ckpt_path = os.path.join(config.CHECKPOINT_DIR, f"round_{fl_round:02d}.pt")
         save_checkpoint(global_model, ckpt_path)
+        if best_round == 0 or metrics["roc_auc"] > best_validation_auc:
+            best_validation_auc = metrics["roc_auc"]
+            best_round = fl_round
+            remaining_patience = config.EARLY_STOPPING_PATIENCE
+            save_checkpoint(global_model, best_ckpt)
+        else:
+            remaining_patience -= 1
+            if remaining_patience == 0:
+                print(f"[FL] Early stopping after {config.EARLY_STOPPING_PATIENCE} rounds without validation AUC improvement.")
+                break
 
     # ======================================================================
     # POST-TRAINING
@@ -234,12 +257,16 @@ def main() -> None:
         json.dump(rounds_log, f, indent=2)
     print(f"\n[FL] Rounds log saved -> {rounds_log_path}")
 
-    # Final evaluation using the last-round checkpoint
-    last_ckpt = os.path.join(config.CHECKPOINT_DIR, f"round_{config.NUM_ROUNDS:02d}.pt")
-    load_checkpoint(global_model, last_ckpt)
-    print(f"[FL] Loaded checkpoint -> {last_ckpt}")
+    # Final evaluation uses the best validation checkpoint exactly once.
+    load_checkpoint(global_model, best_ckpt)
+    print(f"[FL] Loaded best validation checkpoint from round {best_round} -> {best_ckpt}")
 
-    final_metrics = evaluate_model(global_model, test_dataset, device=str(device))
+    val_probs, val_labels, _ = collect_predictions(global_model, validation_dataset, device=str(device))
+    threshold = find_best_threshold(val_labels, val_probs)
+    print(f"[FL] Validation-selected F1 threshold: {threshold:.2f}")
+    final_metrics = evaluate_model(global_model, test_dataset, device=str(device), threshold=threshold)
+    final_metrics["best_validation_round"] = best_round
+    final_metrics["best_validation_roc_auc"] = best_validation_auc
     print_report(final_metrics.copy(), title="Federated Global Model - Final Test Evaluation")
     save_metrics(final_metrics, os.path.join(config.FEDERATED_DIR, "final_metrics.json"))
 
@@ -276,7 +303,7 @@ def main() -> None:
 
     for i, h_dataset in enumerate(hospital_datasets):
         label = hospital_labels[i] if config.NON_IID else f"Hospital {i}"
-        h_metrics = evaluate_model(global_model, h_dataset, device=str(device))
+        h_metrics = evaluate_model(global_model, h_dataset, device=str(device), threshold=threshold)
         comparison_metrics[label] = h_metrics
         local_hospital_metrics[label] = h_metrics
         print(

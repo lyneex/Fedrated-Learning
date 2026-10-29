@@ -29,6 +29,7 @@ SEED = 42
 
 # -- Data Splitting ------------------------------------------------------------
 TEST_SIZE   = 0.20       # fraction held out as the shared test set
+VALIDATION_SIZE = 0.10   # fraction of the remaining training data for model selection
 NUM_CLIENTS = 3          # number of simulated hospitals
 NON_IID     = True       # True -> non-IID hospital split; False -> IID random split
 
@@ -98,6 +99,11 @@ HOSPITAL_MODALITIES = {
 # -- Training ------------------------------------------------------------------
 LEARNING_RATE    = 1e-3
 BATCH_SIZE       = 16    # conservative starting point for a GTX 1650 Ti-class GPU
-BASELINE_EPOCHS  = 20    # epochs for the centralized baseline
-LOCAL_EPOCHS     = 1     # local epochs per federated round (fast prototype)
-NUM_ROUNDS       = 5     # total federated communication rounds (fast prototype)
+BASELINE_EPOCHS  = 30    # epochs for the centralized baseline
+LOCAL_EPOCHS     = 3     # local epochs per federated round
+NUM_ROUNDS       = 20    # total federated communication rounds
+EARLY_STOPPING_PATIENCE = 5
+USE_POS_WEIGHT   = True  # weight the minority class using training labels only
+THRESHOLD_START  = 0.05
+THRESHOLD_STOP   = 0.95
+THRESHOLD_STEP   = 0.01

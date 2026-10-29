@@ -6,7 +6,7 @@ import sys
 import json
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 import numpy as np
 import torch
@@ -19,23 +19,13 @@ from sklearn.metrics import (
 import src.config as config
 
 
-def evaluate_model(
+def collect_predictions(
     model: torch.nn.Module,
     dataset: TensorDataset,
     batch_size: int = 512,
     device: str = "cpu",
-) -> Dict[str, Any]:
-    """
-    Evaluate model on a TensorDataset.
-
-    Supports both legacy 2-tuple (X, y) and multimodal 5-tuple
-    (x_ehr, x_vitals, x_img, mask, y) dataset formats.
-
-    Returns
-    -------
-    dict with keys:
-        loss, accuracy, precision, recall, f1, roc_auc, confusion_matrix
-    """
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Return probabilities, labels, and mean unweighted BCE loss."""
     model.eval()
     model.to(device)
 
@@ -70,18 +60,59 @@ def evaluate_model(
     logits_np = np.concatenate(all_logits)
     labels_np = np.concatenate(all_labels).astype(int)
 
-    probs = 1.0 / (1.0 + np.exp(-logits_np))   # sigmoid
-    preds = (probs >= 0.5).astype(int)
+    probs = 1.0 / (1.0 + np.exp(-logits_np))
+    return probs, labels_np, total_loss / max(n_batches, 1)
+
+
+def find_best_threshold(labels: np.ndarray, probabilities: np.ndarray) -> float:
+    """Choose the validation threshold that maximizes binary F1 score."""
+    thresholds = np.arange(
+        config.THRESHOLD_START,
+        config.THRESHOLD_STOP + config.THRESHOLD_STEP / 2,
+        config.THRESHOLD_STEP,
+    )
+    scores = [
+        f1_score(labels, probabilities >= threshold, zero_division=0)
+        for threshold in thresholds
+    ]
+    return float(thresholds[int(np.argmax(scores))])
+
+
+def metrics_from_predictions(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    loss: float,
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """Calculate binary metrics for probabilities at a fixed threshold."""
+    preds = (probabilities >= threshold).astype(int)
+    try:
+        auc = float(roc_auc_score(labels, probabilities))
+    except ValueError:
+        auc = float("nan")
 
     return {
-        "loss":             total_loss / max(n_batches, 1),
-        "accuracy":         float(accuracy_score(labels_np, preds)),
-        "precision":        float(precision_score(labels_np, preds, zero_division=0)),
-        "recall":           float(recall_score(labels_np, preds, zero_division=0)),
-        "f1":               float(f1_score(labels_np, preds, zero_division=0)),
-        "roc_auc":          float(roc_auc_score(labels_np, probs)),
-        "confusion_matrix": confusion_matrix(labels_np, preds).tolist(),
+        "loss":             loss,
+        "accuracy":         float(accuracy_score(labels, preds)),
+        "precision":        float(precision_score(labels, preds, zero_division=0)),
+        "recall":           float(recall_score(labels, preds, zero_division=0)),
+        "f1":               float(f1_score(labels, preds, zero_division=0)),
+        "roc_auc":          auc,
+        "threshold":        threshold,
+        "confusion_matrix": confusion_matrix(labels, preds, labels=[0, 1]).tolist(),
     }
+
+
+def evaluate_model(
+    model: torch.nn.Module,
+    dataset: TensorDataset,
+    batch_size: int = 512,
+    device: str = "cpu",
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """Evaluate a model using a fixed decision threshold."""
+    probabilities, labels, loss = collect_predictions(model, dataset, batch_size, device)
+    return metrics_from_predictions(probabilities, labels, loss, threshold)
 
 
 def print_report(metrics: Dict[str, Any], title: str = "Evaluation Report") -> None:
@@ -97,6 +128,7 @@ def print_report(metrics: Dict[str, Any], title: str = "Evaluation Report") -> N
     print(f"  Recall     : {metrics['recall']:.4f}")
     print(f"  F1-Score   : {metrics['f1']:.4f}")
     print(f"  ROC-AUC    : {metrics['roc_auc']:.4f}")
+    print(f"  Threshold  : {metrics.get('threshold', 0.5):.2f}")
     if cm is not None:
         print(f"  Confusion Matrix (rows=Actual, cols=Predicted):")
         print(f"               Pred 0    Pred 1")

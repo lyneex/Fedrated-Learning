@@ -12,11 +12,16 @@ plot_client_comparison(model_metrics, save_path)
 """
 import os
 import sys
+import tempfile
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from typing import Dict, List, Any
 
 import numpy as np
+# Some sandboxed or server environments do not provide a writable home cache.
+os.environ.setdefault(
+    "MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "fedrated-learning-matplotlib")
+)
 import matplotlib
 matplotlib.use("Agg")                      # non-interactive, safe for scripts
 import matplotlib.pyplot as plt
@@ -71,17 +76,17 @@ def plot_baseline_history(history: Dict[str, List[float]], save_path: str) -> No
 # -- 2. Federated accuracy per round ------------------------------------------
 
 def plot_accuracy_curve(rounds_log: List[Dict], save_path: str) -> None:
-    """Line chart of global model accuracy over federated rounds."""
+    """Line chart of global validation accuracy over federated rounds."""
     rounds = [r["round"] for r in rounds_log]
     accs   = [r["accuracy"] for r in rounds_log]
 
     fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
-    ax.plot(rounds, accs, marker="o", color=PALETTE[0], linewidth=2.5, label="Global Accuracy")
+    ax.plot(rounds, accs, marker="o", color=PALETTE[0], linewidth=2.5, label="Validation Accuracy")
     ax.axhline(y=max(accs), color=PALETTE[0], linestyle="--", alpha=0.4,
                label=f"Best: {max(accs):.4f}")
     ax.set_xlabel("Federated Round", fontsize=11)
     ax.set_ylabel("Accuracy", fontsize=11)
-    ax.set_title("Global Model Accuracy per Federated Round", fontsize=13, fontweight="bold")
+    ax.set_title("Global Validation Accuracy per Federated Round", fontsize=13, fontweight="bold")
     ax.set_ylim(0.5, 1.0)
     ax.set_xticks(rounds)
     ax.legend(fontsize=10)
@@ -92,15 +97,15 @@ def plot_accuracy_curve(rounds_log: List[Dict], save_path: str) -> None:
 # -- 3. Federated loss per round -----------------------------------------------
 
 def plot_loss_curve(rounds_log: List[Dict], save_path: str) -> None:
-    """Line chart of global model BCE loss over federated rounds."""
+    """Line chart of global validation BCE loss over federated rounds."""
     rounds = [r["round"] for r in rounds_log]
     losses = [r["loss"] for r in rounds_log]
 
     fig, ax = plt.subplots(figsize=FIGSIZE_WIDE)
-    ax.plot(rounds, losses, marker="s", color=PALETTE[1], linewidth=2.5, label="Global BCE Loss")
+    ax.plot(rounds, losses, marker="s", color=PALETTE[1], linewidth=2.5, label="Validation BCE Loss")
     ax.set_xlabel("Federated Round", fontsize=11)
     ax.set_ylabel("BCE Loss", fontsize=11)
-    ax.set_title("Global Model Loss per Federated Round", fontsize=13, fontweight="bold")
+    ax.set_title("Global Validation Loss per Federated Round", fontsize=13, fontweight="bold")
     ax.set_xticks(rounds)
     ax.legend(fontsize=10)
     fig.tight_layout()
